@@ -1,0 +1,748 @@
+Project Scan Report
+Root Directory: C:\Users\pc\Desktop\shahmir
+Platform: win32
+Custom skip extensions: .csv
+==================================================
+
+
+### File: main.py ###
+# main.py
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from typing import List, Dict, Any
+import pandas as pd
+import os
+import uvicorn # Required to run the FastAPI app
+
+# --- Configuration ---
+# Define the base directory where your report folders are located
+BASE_DATA_DIR = "." # Current directory, adjust if your folders are elsewhere
+
+REPORT_FOLDERS = {
+    "PKISRV": os.path.join(BASE_DATA_DIR, "PKISRV"),
+    "PKRV": os.path.join(BASE_DATA_DIR, "PKRV"),
+    "PKFRV": os.path.join(BASE_DATA_DIR, "PKFRV")
+}
+
+app = FastAPI(
+    title="MUFAP Reports Data Viewer",
+    description="API to view and access MUFAP CSV report data.",
+    version="1.0.0"
+)
+
+# --- Helper Function for CSV Reading ---
+def read_csv_with_flexible_encoding(filepath: str) -> pd.DataFrame:
+    """
+    Reads a CSV file, attempting multiple common encodings.
+    Skips initial rows that might contain metadata before the actual header.
+    """
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']
+    
+    # Heuristic: Try to find the actual header row if it's not the first row.
+    # This is a common issue with reports that have titles/metadata at the top.
+    # We'll try reading with different skiprows values.
+    for skip_rows in range(5): # Try skipping 0 to 4 rows
+        for encoding in encodings_to_try:
+            try:
+                # Attempt to read, assuming the first non-empty row after skipping is the header
+                df = pd.read_csv(filepath, encoding=encoding, skiprows=skip_rows)
+                
+                # Check if the header looks like actual column names (not just a single long string)
+                # If the first column name is a long string or looks like metadata, try skipping more
+                if df.empty or len(df.columns) < 2 or (len(df.columns) == 1 and "Unnamed" in df.columns[0]):
+                    continue # This header might still be part of metadata, try skipping more
+                
+                # Drop columns that are entirely unnamed (e.g., 'Unnamed: 0', 'Unnamed: 1')
+                # These often result from irregular CSV formatting
+                df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
+                
+                # Drop rows where all values are NaN (empty rows)
+                df.dropna(how='all', inplace=True)
+
+                # Reset index after dropping rows
+                df.reset_index(drop=True, inplace=True)
+
+                # If the first column is still problematic, consider it as a sign of bad header detection
+                # and continue to the next skip_rows attempt.
+                # This is a heuristic and might need fine-tuning for specific files.
+                if not df.empty and df.columns[0].strip() == "":
+                    continue
+
+                return df
+            except pd.errors.EmptyDataError:
+                # File is empty or no data after skipping rows
+                continue
+            except UnicodeDecodeError:
+                # Encoding failed, try next encoding
+                continue
+            except Exception as e:
+                # Other pandas reading errors, print and try next encoding/skip_rows
+                print(f"Error reading {filepath} with encoding {encoding} and skiprows {skip_rows}: {e}")
+                continue
+    
+    raise ValueError(f"Could not read CSV file: {filepath} with any of the tried encodings/skiprows.")
+
+
+# --- API Endpoints ---
+
+@app.get("/", response_class=HTMLResponse, summary="Home Page")
+async def read_root():
+    """
+    Provides a simple HTML home page with links to available report types.
+    """
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>MUFAP Reports Viewer</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            body { font-family: 'Inter', sans-serif; }
+        </style>
+    </head>
+    <body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+            <h1 class="text-3xl font-bold text-gray-800 mb-6">Welcome to MUFAP Reports Viewer</h1>
+            <p class="text-gray-600 mb-8">Select a report type to view available files:</p>
+            <div class="space-y-4">
+                <a href="/reports/PKISRV" class="block bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    View PKISRV Reports
+                </a>
+                <a href="/reports/PKRV" class="block bg-green-500 hover:bg-green-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    View PKRV Reports
+                </a>
+                <a href="/reports/PKFRV" class="block bg-purple-500 hover:bg-purple-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    View PKFRV Reports
+                </a>
+            </div>
+            <p class="text-sm text-gray-500 mt-8">Note: Data consistency varies across files. Pre-processing is recommended for structured analysis.</p>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get("/reports/{report_type}", response_model=List[str], summary="List Files by Report Type")
+async def list_files(report_type: str):
+    """
+    Lists all available CSV file names for a given report type.
+    """
+    if report_type not in REPORT_FOLDERS:
+        raise HTTPException(status_code=404, detail="Report type not found.")
+    
+    folder_path = REPORT_FOLDERS[report_type]
+    if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
+        raise HTTPException(status_code=404, detail=f"Folder for {report_type} not found or is not a directory.")
+    
+    csv_files = [f for f in os.listdir(folder_path) if f.endswith('.csv')]
+    if not csv_files:
+        raise HTTPException(status_code=404, detail=f"No CSV files found for {report_type}.")
+    
+    return csv_files
+
+@app.get("/reports/{report_type}/{file_name}", response_model=List[Dict[str, Any]], summary="View Specific Report Data")
+async def get_report_data(report_type: str, file_name: str):
+    """
+    Reads and returns the content of a specific CSV report file as JSON.
+    Handles various CSV formats and skips initial metadata rows.
+    """
+    if report_type not in REPORT_FOLDERS:
+        raise HTTPException(status_code=404, detail="Report type not found.")
+    
+    folder_path = REPORT_FOLDERS[report_type]
+    file_path = os.path.join(folder_path, file_name)
+
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = read_csv_with_flexible_encoding(file_path)
+        # Convert DataFrame to a list of dictionaries (JSON format)
+        return df.to_dict(orient="records")
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=f"Error reading CSV: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+
+# --- Run the application (for development/testing) ---
+# To run this, save it as main.py and execute: uvicorn main:app --reload
+# You will need to install uvicorn: pip install uvicorn
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+========================================
+
+### File: readme.md ###
+/html/body/div/div[5]/div[2]/div/div/div[2]/div/div/div[2]/div/div/div[2]/table/tbody/tr[13]/td[1]
+/html/body/div/div[5]/div[2]/div/div/div[2]/div/div/div[2]/div/div/div[2]/table/tbody/tr[13]/td[2]
+/html/body/div/div[5]/div[2]/div/div/div[2]/div/div/div[2]/div/div/div[2]/table/tbody/tr[14]/td[3]/a
+
+========================================
+
+### File: shahmir_files.txt ###
+Project Scan Report
+Root Directory: C:\Users\pc\Desktop\shahmir
+Platform: win32
+Custom skip extensions: .csv
+==================================================
+
+
+### File: main.py ###
+# main.py
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from typing import List, Dict, Any
+import pandas as pd
+import os
+import uvicorn # Required to run the FastAPI app
+
+# --- Configuration ---
+# Define the base directory where your report folders are located
+BASE_DATA_DIR = "." # Current directory, adjust if your folders are elsewhere
+
+REPORT_FOLDERS = {
+    "PKISRV": os.path.join(BASE_DATA_DIR, "PKISRV"),
+    "PKRV": os.path.join(BASE_DATA_DIR, "PKRV"),
+    "PKFRV": os.path.join(BASE_DATA_DIR, "PKFRV")
+}
+
+app = FastAPI(
+    title="MUFAP Reports Data Viewer",
+    description="API to view and access MUFAP CSV report data.",
+    version="1.0.0"
+)
+
+# --- Helper Function for CSV Reading ---
+def read_csv_with_flexible_encoding(filepath: str) -> pd.DataFrame:
+    """
+    Reads a CSV file, attempting multiple common encodings.
+    Skips initial rows that might contain metadata before the actual header.
+    """
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']
+    
+    # Heuristic: Try to find the actual header row if it's not the first row.
+    # This is a common issue with reports that have titles/metadata at the top.
+    # We'll try reading with different skiprows values.
+    for skip_rows in range(5): # Try skipping 0 to 4 rows
+        for encoding in encodings_to_try:
+            try:
+                # Attempt to read, assuming the first non-empty row after skipping is the header
+                df = pd.read_csv(filepath, encoding=encoding, skiprows=skip_rows)
+                
+                # Check if the header looks like actual column names (not just a single long string)
+                # If the first column name is a long string or looks like metadata, try skipping more
+                if df.empty or len(df.columns) < 2 or (len(df.columns) == 1 and "Unnamed" in df.columns[0]):
+                    continue # This header might still be part of metadata, try skipping more
+                
+                # Drop columns that are entirely unnamed (e.g., 'Unnamed: 0', 'Unnamed: 1')
+                # These often result from irregular CSV formatting
+                df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
+                
+                # Drop rows where all values are NaN (empty rows)
+                df.dropna(how='all', inplace=True)
+
+                # Reset index after dropping rows
+                df.reset_index(drop=True, inplace=True)
+
+                # If the first column is still problematic, consider it as a sign of bad header detection
+                # and continue to the next skip_rows attempt.
+                # This is a heuristic and might need fine-tuning for specific files.
+                if not df.empty and df.columns[0].strip() == "":
+                    continue
+
+                return df
+            except pd.errors.EmptyDataError:
+                # File is empty or no data after skipping rows
+                continue
+            except UnicodeDecodeError:
+                # Encoding failed, try next encoding
+                continue
+            except Exception as e:
+                # Other pandas reading errors, print and try next encoding/skip_rows
+                print(f"Error reading {filepath} with encoding {encoding} and skiprows {skip_rows}: {e}")
+                continue
+    
+    raise ValueError(f"Could not read CSV file: {filepath} with any of the tried encodings/skiprows.")
+
+
+# --- API Endpoints ---
+
+@app.get("/", response_class=HTMLResponse, summary="Home Page")
+async def read_root():
+    """
+    Provides a simple HTML home page with links to available report types.
+    """
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>MUFAP Reports Viewer</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            body { font-family: 'Inter', sans-serif; }
+        </style>
+    </head>
+    <body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+            <h1 class="text-3xl font-bold text-gray-800 mb-6">Welcome to MUFAP Reports Viewer</h1>
+            <p class="text-gray-600 mb-8">Select a report type to view available files:</p>
+            <div class="space-y-4">
+                <a href="/reports/PKISRV" class="block bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    View PKISRV Reports
+                </a>
+                <a href="/reports/PKRV" class="block bg-green-500 hover:bg-green-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    View PKRV Reports
+                </a>
+                <a href="/reports/PKFRV" class="block bg-purple-500 hover:bg-purple-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    View PKFRV Reports
+                </a>
+            </div>
+            <p class="text-sm text-gray-500 mt-8">Note: Data consistency varies across files. Pre-processing is recommended for structured analysis.</p>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get("/reports/{report_type}", response_model=List[str], summary="List Files by Report Type")
+async def list_files(report_type: str):
+    """
+    Lists all available CSV file names for a given report type.
+    """
+    if report_type not in REPORT_FOLDERS:
+        raise HTTPException(status_code=404, detail="Report type not found.")
+    
+    folder_path = REPORT_FOLDERS[report_type]
+    if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
+        raise HTTPException(status_code=404, detail=f"Folder for {report_type} not found or is not a directory.")
+    
+    csv_files = [f for f in os.listdir(folder_path) if f.endswith('.csv')]
+    if not csv_files:
+        raise HTTPException(status_code=404, detail=f"No CSV files found for {report_type}.")
+    
+    return csv_files
+
+@app.get("/reports/{report_type}/{file_name}", response_model=List[Dict[str, Any]], summary="View Specific Report Data")
+async def get_report_data(report_type: str, file_name: str):
+    """
+    Reads and returns the content of a specific CSV report file as JSON.
+    Handles various CSV formats and skips initial metadata rows.
+    """
+    if report_type not in REPORT_FOLDERS:
+        raise HTTPException(status_code=404, detail="Report type not found.")
+    
+    folder_path = REPORT_FOLDERS[report_type]
+    file_path = os.path.join(folder_path, file_name)
+
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    try:
+        df = read_csv_with_flexible_encoding(file_path)
+        # Convert DataFrame to a list of dictionaries (JSON format)
+        return df.to_dict(orient="records")
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=f"Error reading CSV: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+
+# --- Run the application (for development/testing) ---
+# To run this, save it as main.py and execute: uvicorn main:app --reload
+# You will need to install uvicorn: pip install uvicorn
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+========================================
+
+### File: readme.md ###
+/html/body/div/div[5]/div[2]/div/div/div[2]/div/div/div[2]/div/div/div[2]/table/tbody/tr[13]/td[1]
+/html/body/div/div[5]/div[2]/div/div/div[2]/div/div/div[2]/div/div/div[2]/table/tbody/tr[13]/td[2]
+/html/body/div/div[5]/div[2]/div/div/div[2]/div/div/div[2]/div/div/div[2]/table/tbody/tr[14]/td[3]/a
+
+========================================
+
+### File: try2.py ###
+import requests
+import json
+import sqlite3
+import os
+import re
+from datetime import datetime
+import asyncio
+import aiohttp # For asynchronous HTTP requests
+import aiofiles # For asynchronous file operations (optional, but good practice with asyncio)
+
+# --- Configuration ---
+API_URL = "https://mufap.com.pk/WebRegulations/GetSecpFileById"
+BASE_FILE_DOWNLOAD_URL = "https://mufap.com.pk"
+DATABASE_NAME = "mufap_data.db"
+REPORT_FOLDERS = {
+    "PKISRV": "PKISRV",
+    "PKRV": "PKRV",
+    "PKFRV": "PKFRV"
+}
+# Ensure these folders exist
+for folder in REPORT_FOLDERS.values():
+    os.makedirs(folder, exist_ok=True)
+
+# --- Database Functions ---
+# SQLite operations are synchronous, but we'll manage connections carefully.
+def connect_db():
+    """Establishes a connection to the SQLite database."""
+    try:
+        conn = sqlite3.connect(DATABASE_NAME)
+        conn.row_factory = sqlite3.Row # Allows accessing columns by name
+        return conn
+    except sqlite3.Error as e:
+        print(f"Database connection error: {e}")
+        return None
+
+def create_table(conn):
+    """Creates the mufap_reports table if it doesn't exist."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS mufap_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                timeofadding DATETIME DEFAULT CURRENT_TIMESTAMP,
+                date TEXT,
+                title TEXT,
+                filepath TEXT UNIQUE, -- Added UNIQUE constraint for FilePath
+                report_type TEXT,
+                fk_header_submenu_tab_id INTEGER
+            )
+        ''')
+        conn.commit()
+        print("Table 'mufap_reports' ensured to exist.")
+    except sqlite3.Error as e:
+        print(f"Error creating table: {e}")
+
+def report_exists_in_db(conn, filepath):
+    """Checks if a report with the given filepath already exists in the database."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM mufap_reports WHERE filepath = ?", (filepath,))
+    return cursor.fetchone() is not None
+
+def insert_report_data(conn, report_data):
+    """Inserts a single report's metadata into the database, preventing duplicates."""
+    filepath = report_data.get('FilePath')
+    if not filepath:
+        print(f"Skipping insertion for report with no FilePath: {report_data.get('Title')}")
+        return False
+
+    if report_exists_in_db(conn, filepath):
+        print(f"Skipping DB insertion: Report already exists for FilePath: {filepath}")
+        return False
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO mufap_reports (date, title, filepath, report_type, fk_header_submenu_tab_id)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (report_data['Date'], report_data['Title'], report_data['FilePath'], report_data['report_type'], report_data['fk_HeaderSubMenuTabId']))
+        conn.commit()
+        print(f"Inserted: {report_data['Title']} (fk_HeaderSubMenuTabId: {report_data['fk_HeaderSubMenuTabId']})")
+        return True
+    except sqlite3.Error as e:
+        print(f"Error inserting data for {report_data['Title']}: {e}")
+        return False
+
+# --- Helper Functions ---
+def parse_dotnet_date(date_string):
+    """
+    Parses a .NET /Date(...) string and returns a formatted datetime string.
+    Example: /Date(1580238000000)/ -> 2020-01-28 11:00:00
+    """
+    match = re.search(r'\/Date\((\d+)\)\/', date_string)
+    if match:
+        timestamp_ms = int(match.group(1))
+        # Convert milliseconds to seconds
+        dt_object = datetime.fromtimestamp(timestamp_ms / 1000)
+        return dt_object.strftime('%Y-%m-%d %H:%M:%S')
+    return date_string # Return original if not in expected format
+
+def get_report_type(title):
+    """Determines the report type based on the title."""
+    title_upper = title.upper()
+    if "PKISRV" in title_upper:
+        return "PKISRV"
+    elif "PKRV" in title_upper:
+        return "PKRV"
+    elif "PKFRV" in title_upper:
+        return "PKFRV"
+    return "UNKNOWN"
+
+async def download_file(session, file_url, save_path):
+    """Downloads a file from a given URL and saves it to a specified path asynchronously."""
+    if os.path.exists(save_path):
+        print(f"Skipping download: File already exists at: {save_path}")
+        return True
+
+    try:
+        print(f"Attempting to download: {file_url}")
+        async with session.get(file_url) as response:
+            response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+
+            # Using aiofiles for asynchronous file writing
+            async with aiofiles.open(save_path, 'wb') as f:
+                async for chunk in response.content.iter_chunked(8192):
+                    await f.write(chunk)
+        print(f"Successfully downloaded and saved to: {save_path}")
+        return True
+    except aiohttp.ClientError as e:
+        print(f"Error downloading {file_url}: {e}")
+        return False
+    except Exception as e:
+        print(f"An unexpected error occurred during download of {file_url}: {e}")
+        return False
+
+async def process_single_report(session, conn, report_data_raw, fk_header_submenu_tab_id):
+    """Processes a single report: parses data, inserts into DB, and downloads file."""
+    # Create a mutable copy of report_data_raw
+    report = report_data_raw.copy()
+
+    # Process metadata
+    report['Date'] = parse_dotnet_date(report.get('Date', ''))
+    report['report_type'] = get_report_type(report.get('Title', ''))
+    report['fk_HeaderSubMenuTabId'] = fk_header_submenu_tab_id # Add the ID to the report data
+
+    # Insert into DB (synchronous, but fast enough for individual inserts)
+    if insert_report_data(conn, report):
+        # Download file
+        file_path_suffix = report.get('FilePath')
+        if file_path_suffix:
+            full_file_url = BASE_FILE_DOWNLOAD_URL + file_path_suffix
+            
+            # Determine save directory
+            report_type_folder = REPORT_FOLDERS.get(report['report_type'], 'UNKNOWN_REPORTS')
+            os.makedirs(report_type_folder, exist_ok=True) # Ensure folder exists
+            
+            # Extract filename from FilePath
+            file_name = os.path.basename(file_path_suffix)
+            save_path = os.path.join(report_type_folder, file_name)
+            
+            await download_file(session, full_file_url, save_path)
+        else:
+            print(f"No FilePath found for report: {report.get('Title')}")
+    else:
+        print(f"Skipping file download for {report.get('Title')} due to DB insertion being skipped or failed.")
+
+
+# --- Main Scraper Logic ---
+async def scrape_mufap_reports(fk_header_submenu_tab_id):
+    """
+    Main asynchronous function to fetch reports, store metadata in DB, and download files.
+    Accepts fk_header_submenu_tab_id as an argument.
+    """
+    conn = connect_db()
+    if not conn:
+        return
+
+    create_table(conn)
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Referer': 'https://mufap.com.pk/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+    }
+    payload = {'fk_HeaderSubMenuTabId': fk_header_submenu_tab_id}
+
+    print(f"\n--- Fetching data for fk_HeaderSubMenuTabId: {fk_header_submenu_tab_id} ---")
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.post(API_URL, json=payload) as response:
+                response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+                
+                data_response = await response.json()
+
+            # Check for the "No data found" message but continue to process the 'data' field
+            if data_response.get("statusCode") == "00" and data_response.get("message") == "No data found":
+                print(f"API returned 'No data found' message for fk_HeaderSubMenuTabId: {fk_header_submenu_tab_id}. Still checking 'data' field...")
+
+            reports = data_response.get("data", [])
+            if not reports:
+                print(f"No reports found in the 'data' field of the response for fk_header_submenu_tab_id: {fk_header_submenu_tab_id}.")
+                return # Exit if 'data' is truly empty
+
+            print(f"Found {len(reports)} reports for fk_header_submenu_tab_id: {fk_header_submenu_tab_id}.")
+            
+            # Create a list of tasks to run concurrently
+            tasks = []
+            for report_data_raw in reports:
+                tasks.append(process_single_report(session, conn, report_data_raw, fk_header_submenu_tab_id))
+            
+            # Run all tasks concurrently
+            await asyncio.gather(*tasks)
+
+        except aiohttp.ClientError as e:
+            print(f"Error during API call for fk_header_submenu_tab_id {fk_header_submenu_tab_id}: {e}")
+        except json.JSONDecodeError:
+            print(f"Failed to decode JSON response from API for fk_header_submenu_tab_id {fk_header_submenu_tab_id}.")
+        except Exception as e:
+            print(f"An unexpected error occurred during scraping: {e}")
+        finally:
+            if conn:
+                conn.close()
+                print("Database connection closed.")
+
+# --- Execute the scraper ---
+if __name__ == "__main__":
+    # Ensure aiofiles is installed: pip install aiofiles
+    # Ensure aiohttp is installed: pip install aiohttp
+
+    # Only try the specific ID 46 as requested
+    asyncio.run(scrape_mufap_reports(46)) 
+
+    print("\n--- Scraper run complete ---")
+
+========================================
+
+### File: verify_columns.py ###
+import os
+import pandas as pd
+from collections import Counter
+
+# --- Configuration ---
+# Define the base directory where your report folders are located
+BASE_DATA_DIR = "." # Current directory, adjust if your folders are elsewhere
+
+REPORT_FOLDERS = {
+    "PKISRV": os.path.join(BASE_DATA_DIR, "PKISRV"),
+    "PKRV": os.path.join(BASE_DATA_DIR, "PKRV"),
+    "PKFRV": os.path.join(BASE_DATA_DIR, "PKFRV")
+}
+
+# --- Helper Functions ---
+def get_csv_header(filepath: str) -> list[str] | None:
+    """
+    Reads the header (first row) of a CSV file and returns it as a list of column names.
+    Uses pandas to robustly read CSVs, handling various delimiters and quoting.
+    Tries multiple encodings and skiprows values to find the actual header.
+    """
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']
+    
+    for skip_rows in range(5): # Try skipping 0 to 4 rows
+        for encoding in encodings_to_try:
+            try:
+                # Attempt to read, assuming the first non-empty row after skipping is the header
+                df = pd.read_csv(filepath, encoding=encoding, skiprows=skip_rows, nrows=0)
+                
+                # Check if the header looks like actual column names (not just a single long string)
+                # If the first column name is a long string or looks like metadata, try skipping more
+                if df.empty or len(df.columns) < 1: # Must have at least one column
+                    continue 
+                
+                # Drop columns that are entirely unnamed (e.g., 'Unnamed: 0', 'Unnamed: 1')
+                # These often result from irregular CSV formatting
+                # Note: This is applied to the *header detection logic*, not the actual data load.
+                # It helps in standardizing the detected header for comparison.
+                cleaned_columns = [col for col in df.columns if not str(col).strip().lower().startswith('unnamed:')]
+                
+                # If after cleaning, there are very few columns or they still look like metadata,
+                # it might mean the header is still not correctly identified.
+                # This is a heuristic and might need fine-tuning for specific files.
+                if not cleaned_columns: # If all columns were 'Unnamed' or empty, this might not be the real header
+                    continue
+                
+                return cleaned_columns # Return the cleaned list of column names
+            except pd.errors.EmptyDataError:
+                # File is empty or no data after skipping rows
+                continue
+            except UnicodeDecodeError:
+                # Encoding failed, try next encoding
+                continue
+            except Exception as e:
+                # Other pandas reading errors, print and try next encoding/skip_rows
+                # print(f"Debug: Error reading {filepath} with encoding {encoding} and skiprows {skip_rows}: {e}")
+                continue
+    
+    # print(f"Warning: Could not read header from {filepath} with any of the tried encodings/skiprows.")
+    return None
+
+# --- Main Analysis Logic ---
+def analyze_csv_columns():
+    """
+    Analyzes column structures of CSV files within each report folder,
+    identifying the most common and all unique combinations.
+    """
+    print("--- Starting CSV Column Structure Analysis ---")
+
+    for report_type, folder_path in REPORT_FOLDERS.items():
+        print(f"\nAnalyzing folder: {folder_path} ({report_type} reports)")
+
+        if not os.path.exists(folder_path):
+            print(f"Folder does not exist: {folder_path}. Skipping.")
+            continue
+        if not os.path.isdir(folder_path):
+            print(f"Path is not a directory: {folder_path}. Skipping.")
+            continue
+
+        csv_files = [f for f in os.listdir(folder_path) if f.endswith('.csv')]
+
+        if not csv_files:
+            print(f"No CSV files found in {folder_path}.")
+            continue
+
+        # Use Counter to count occurrences of each unique header structure
+        # Convert list of columns to a tuple so it's hashable for Counter
+        header_counts = Counter()
+        file_to_header_map = {} # To store which files map to which header structure
+
+        for filename in csv_files:
+            filepath = os.path.join(folder_path, filename)
+            header = get_csv_header(filepath)
+            if header is not None:
+                header_tuple = tuple(header) # Convert list to tuple for hashing
+                header_counts[header_tuple] += 1
+                if header_tuple not in file_to_header_map:
+                    file_to_header_map[header_tuple] = []
+                file_to_header_map[header_tuple].append(filename)
+            else:
+                print(f"Could not determine header for file: {filename}. Skipping from analysis.")
+
+        if not header_counts:
+            print(f"No valid headers extracted from any CSV in {folder_path}.")
+            continue
+
+        print(f"\n--- Column Structure Summary for {report_type} ---")
+        
+        # Find the most common header structure
+        most_common_header, most_common_count = header_counts.most_common(1)[0]
+        print(f"Most Common Structure ({most_common_count} files):")
+        print(f"  Columns: {list(most_common_header)}")
+        print(f"  Example files: {file_to_header_map.get(most_common_header, [])[:3]}...") # Show first 3 examples
+
+        print("\nAll Unique Column Structures and Their Counts:")
+        for header_tuple, count in header_counts.most_common(): # Iterate in descending order of frequency
+            print(f"  Count: {count}")
+            print(f"  Columns: {list(header_tuple)}")
+            # Optionally, list some files for each structure
+            # print(f"  Files: {file_to_header_map.get(header_tuple, [])[:2]}...") # Show first 2 examples
+            print("-" * 30)
+
+    print("\n--- CSV Column Structure Analysis Complete ---")
+
+# --- Execute the script ---
+if __name__ == "__main__":
+    # Ensure pandas is installed: pip install pandas
+    analyze_csv_columns()
+
+========================================
+
+--- Directory: PKFRV ---
+
+--- Directory: PKISRV ---
+
+--- Directory: PKRV ---
+
+--- Directory: UNKNOWN_REPORTS ---
+
+Scan completed!
+Total files processed: 5
+Total files skipped: 2661
