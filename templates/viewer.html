@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Data Viewer | {{ table_name or 'Home' }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- DataTables CSS and Buttons Extension CSS -->
+    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/v/dt/jszip-2.5.0/dt-1.13.6/b-2.4.2/b-html5-2.4.2/b-print-2.4.2/datatables.min.css"/>
+ 
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }
+        .dataTables_wrapper .dataTables_length, .dataTables_wrapper .dataTables_filter, .dataTables_wrapper .dataTables_info, .dataTables_wrapper .dataTables_paginate {
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+        }
+        .dataTables_wrapper .dt-buttons {
+            float: right;
+            margin-left: 1rem;
+        }
+        .dataTables_wrapper .dt-button {
+            background-color: #4f46e5 !important;
+            color: white !important;
+            border-radius: 0.375rem !important;
+            padding: 0.5rem 1rem !important;
+            transition: background-color 0.2s !important;
+            border: none !important;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        }
+        .dataTables_wrapper .dt-button:hover {
+            background-color: #4338ca !important;
+        }
+        th { cursor: pointer; }
+        .dataTables_processing {
+            background-color: rgba(255, 255, 255, 0.8) !important;
+        }
+    </style>
+</head>
+<body class="text-slate-800 flex flex-col min-h-screen">
+
+    <main class="flex-grow">
+        <div class="container mx-auto p-4 sm:p-6 lg:p-8">
+            <header class="text-center mb-10">
+                <div class="inline-block bg-indigo-100 text-indigo-700 p-4 rounded-full">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z" />
+                    </svg>
+                </div>
+                <h1 class="text-4xl font-bold text-slate-900 mt-4">Financial Data Viewer</h1>
+                <p class="text-lg text-slate-600 mt-2">Browse, search, and export consolidated reports.</p>
+            </header>
+
+            <div class="flex justify-center gap-4 mb-10">
+                <a href="/data/PKFRV" class="bg-white hover:border-blue-600 hover:text-blue-700 border-2 border-transparent shadow-lg text-slate-700 font-bold py-3 px-6 rounded-lg transition-all transform hover:-translate-y-1">
+                    View Mutual Fund Data (PKFRV)
+                </a>
+                <a href="/data/PKRV" class="bg-white hover:border-green-600 hover:text-green-700 border-2 border-transparent shadow-lg text-slate-700 font-bold py-3 px-6 rounded-lg transition-all transform hover:-translate-y-1">
+                    View Tenor Rates (PKRV)
+                </a>
+            </div>
+
+            {% if table_name %}
+            <div class="bg-white rounded-xl shadow-2xl overflow-hidden">
+                <div class="p-6 border-b border-slate-200 flex justify-between items-center">
+                    <h2 class="text-2xl font-semibold text-slate-800">Report: {{ table_name }}</h2>
+                    <span class="text-sm text-slate-500">Click headers to sort, or use the search box.</span>
+                </div>
+                <div class="p-6">
+                    <table id="dataTable" class="display" style="width:100%">
+                        <thead>
+                            <tr>
+                                {% for header in headers %}
+                                <th class="text-left">{{ header }}</th>
+                                {% endfor %}
+                                <th class="text-left">Source File</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- The table body will be populated by the server -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </main>
+
+    <footer class="text-center p-4 text-slate-500 text-sm">
+        <p>MUFAP Data Viewer &copy; 2024</p>
+    </footer>
+
+    <!-- Required JS Libraries -->
+    <script src="https://code.jquery.com/jquery-3.7.0.js"></script>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.36/pdfmake.min.js"></script>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.36/vfs_fonts.js"></script>
+    <script type="text/javascript" src="https://cdn.datatables.net/v/dt/jszip-2.5.0/dt-1.13.6/b-2.4.2/b-html5-2.4.2/b-print-2.4.2/datatables.min.js"></script>
+
+    <script>
+        // Suppress DataTables warnings
+        $.fn.dataTable.ext.errMode = 'none';
+        
+        $(document).ready(function() {
+            // This check ensures the script only runs when a table is present
+            if ($('#dataTable').length) {
+                $('#dataTable').DataTable({
+                    // Show a "Processing..." message when sorting/searching
+                    processing: true,
+                    // Enable server-side mode
+                    serverSide: true,
+                    // URL to fetch data from
+                    ajax: {
+                        url: "/api/data/{{ report_type_raw }}",
+                        type: "POST"
+                    },
+                    // Define which data properties map to which columns
+                    columns: [
+                        {% for header in headers %}
+                        { data: "{{ header }}" },
+                        {% endfor %}
+                        {
+                            data: "display_filename",
+                            orderable: false,
+                            searchable: false,
+                            render: function(data, type, row) {
+                                return `<a href="/download/${row.download_path}" class="text-indigo-600 hover:text-indigo-900 font-medium" download>${data}</a>`;
+                            }
+                        }
+                    ],
+                    // Standard controls
+                    dom: 'lBfrtip',
+                    buttons: [ 'copy', 'csv', 'excel', 'pdf', 'print' ],
+                    pageLength: 100,
+                    lengthMenu: [ [10, 25, 50, 100, 500], [10, 25, 50, 100, 500] ]
+                });
+            }
+        });
+    </script>
+</body>
+</html>
